@@ -14,15 +14,17 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Install PyNaCl
+        run: |
+          pip install PyNaCl
+
       - name: Login and Update Cookie
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
           REPO: ${{ github.repository }}
+          OLD_COOKIE: ${{ secrets.LOGIN_COOKIE }}
         run: |
           echo "开始登录..."
-          
-          # 从 GitHub Secrets 读取当前 Cookie
-          COOKIE="${{ secrets.LOGIN_COOKIE }}"
           
           # 创建临时文件存储 Cookie
           COOKIE_FILE=$(mktemp)
@@ -30,7 +32,7 @@ jobs:
           # 使用 curl 发送请求并保存新的 Cookie
           response=$(curl -s -w "\n%{http_code}" -L \
             -c "$COOKIE_FILE" \
-            -b "$COOKIE" \
+            -b "$OLD_COOKIE" \
             -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
             -H "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8" \
             -H "Accept-Language: zh-CN,zh;q=0.9,en;q=0.8" \
@@ -42,6 +44,16 @@ jobs:
           body=$(echo "$response" | sed '$d')
           
           echo "HTTP 状态码: $http_code"
+          
+          # 检查是否登录成功
+          if [ "$http_code" != "200" ]; then
+            echo "❌ 登录失败，HTTP状态码: $http_code"
+            rm -f "$COOKIE_FILE"
+            exit 1
+          fi
+          
+          echo "✅ 登录成功！"
+          echo "登录时间: $(date '+%Y-%m-%d %H:%M:%S')"
           
           # 从 Cookie 文件中提取新的 Cookie
           NEW_COOKIE=""
@@ -67,81 +79,69 @@ jobs:
             echo "Cookie 长度: ${#NEW_COOKIE}"
           fi
           
-          # 检查是否登录成功
-          if [ "$http_code" = "200" ]; then
-            echo "✅ 登录成功！"
-            echo "登录时间: $(date '+%Y-%m-%d %H:%M:%S')"
+          # 如果获取到新的 Cookie，更新 GitHub Secret
+          if [ -n "$NEW_COOKIE" ] && [ ${#NEW_COOKIE} -gt 10 ]; then
+            echo "正在更新 GitHub Secret..."
             
-            # 如果获取到新的 Cookie，更新 GitHub Secret
-            if [ -n "$NEW_COOKIE" ] && [ ${#NEW_COOKIE} -gt 10 ]; then
-              echo "正在更新 GitHub Secret..."
+            # 获取 Secret 的公钥
+            pub_key_response=$(curl -s -H "Authorization: token $GH_TOKEN" \
+              -H "Accept: application/vnd.github.v3+json" \
+              "https://api.github.com/repos/$REPO/actions/secrets/public-key")
+            
+            key_id=$(echo "$pub_key_response" | jq -r '.key_id')
+            public_key=$(echo "$pub_key_response" | jq -r '.key')
+            
+            if [ -n "$key_id" ] && [ "$key_id" != "null" ] && [ -n "$public_key" ] && [ "$public_key" != "null" ]; then
+              # 使用 Python 加密 Secret
+              cat > /tmp/encrypt_secret.py << 'PYTHON_SCRIPT'
+          import base64
+          import sys
+          import os
+          from nacl import encoding, public
+          
+          def encrypt_secret(public_key_str, secret_value):
+              public_key_bytes = base64.b64decode(public_key_str)
+              public_key_obj = public.PublicKey(public_key_bytes)
+              sealed_box = public.SealedBox(public_key_obj)
+              encrypted = sealed_box.encrypt(secret_value.encode("utf-8"))
+              return base64.b64encode(encrypted).decode("utf-8")
+          
+          if __name__ == "__main__":
+              pub_key = sys.argv[1]
+              secret = sys.argv[2]
+              try:
+                  result = encrypt_secret(pub_key, secret)
+                  print(result)
+              except Exception as e:
+                  print(f"ERROR: {e}", file=sys.stderr)
+                  sys.exit(1)
+          PYTHON_SCRIPT
               
-              # 获取 Secret 的公钥
-              pub_key_response=$(curl -s -H "Authorization: token $GH_TOKEN" \
-                -H "Accept: application/vnd.github.v3+json" \
-                "https://api.github.com/repos/$REPO/actions/secrets/public-key")
+              encrypted_value=$(python3 /tmp/encrypt_secret.py "$public_key" "$NEW_COOKIE")
               
-              key_id=$(echo "$pub_key_response" | grep -o '"key_id":"[^"]*' | cut -d'"' -f4)
-              public_key=$(echo "$pub_key_response" | grep -o '"key":"[^"]*' | cut -d'"' -f4)
-              
-              if [ -n "$key_id" ] && [ -n "$public_key" ]; then
-                # 使用 Python 加密 Secret（GitHub API 要求使用 libsodium 加密）
-                encrypted_value=$(python3 << EOF
-import base64
-import json
-from nacl import encoding, public
-
-def encrypt_secret(public_key: str, secret_value: str) -> str:
-    public_key_bytes = base64.b64decode(public_key)
-    public_key_obj = public.PublicKey(public_key_bytes)
-    sealed_box = public.SealedBox(public_key_obj)
-    encrypted = sealed_box.encrypt(secret_value.encode("utf-8"))
-    return base64.b64encode(encrypted).decode("utf-8")
-
-try:
-    result = encrypt_secret("$public_key", "$NEW_COOKIE")
-    print(result)
-except Exception as e:
-    print(f"ERROR: {e}", file=sys.stderr)
-    exit(1)
-EOF
-)
+              if [ $? -eq 0 ] && [ -n "$encrypted_value" ]; then
+                # 更新 Secret
+                update_response=$(curl -s -X PUT \
+                  -H "Authorization: token $GH_TOKEN" \
+                  -H "Accept: application/vnd.github.v3+json" \
+                  "https://api.github.com/repos/$REPO/actions/secrets/LOGIN_COOKIE" \
+                  -d "{\"encrypted_value\":\"$encrypted_value\",\"key_id\":\"$key_id\"}")
                 
-                if [ $? -eq 0 ] && [ -n "$encrypted_value" ]; then
-                  # 更新 Secret
-                  update_response=$(curl -s -X PUT \
-                    -H "Authorization: token $GH_TOKEN" \
-                    -H "Accept: application/vnd.github.v3+json" \
-                    "https://api.github.com/repos/$REPO/actions/secrets/LOGIN_COOKIE" \
-                    -d "{\"encrypted_value\":\"$encrypted_value\",\"key_id\":\"$key_id\"}")
-                  
-                  echo "✅ Cookie 已更新到 GitHub Secrets"
-                else
-                  echo "⚠️ Cookie 加密失败"
-                fi
+                echo "✅ Cookie 已更新到 GitHub Secrets"
               else
-                echo "⚠️ 无法获取公钥，跳过 Cookie 更新"
+                echo "⚠️ Cookie 加密失败"
               fi
+              
+              rm -f /tmp/encrypt_secret.py
             else
-              echo "⚠️ 未获取到有效的新 Cookie"
-            fi
-            
-            # 检查响应内容
-            if echo "$body" | grep -q "logout\|dashboard\|account"; then
-              echo "✅ 确认已登录状态"
+              echo "⚠️ 无法获取公钥，跳过 Cookie 更新"
             fi
           else
-            echo "❌ 登录失败，HTTP状态码: $http_code"
-            exit 1
+            echo "⚠️ 未获取到有效的新 Cookie"
           fi
           
           # 清理临时文件
           rm -f "$COOKIE_FILE"
-
-      - name: Install PyNaCl
-        if: success()
-        run: |
-          pip install PyNaCl
 
       - name: Summary
         if: always()
@@ -150,8 +150,4 @@ EOF
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "- 🕐 执行时间: $(date '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
           echo "- 🌐 目标网站: https://optiklink.com/" >> $GITHUB_STEP_SUMMARY
-          if [ $? -eq 0 ]; then
-            echo "- ✅ 状态: 登录成功，Cookie 已更新" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "- ❌ 状态: 登录失败" >> $GITHUB_STEP_SUMMARY
-          fi
+          echo "- ✅ 状态: 执行完成" >> $GITHUB_STEP_SUMMARY
