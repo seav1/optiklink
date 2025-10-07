@@ -1,0 +1,65 @@
+name: Auto Login with Cookie
+
+on:
+  schedule:
+    # 每2天运行一次，北京时间上午9点（UTC 1:00）
+    - cron: '0 1 */2 * *'
+  workflow_dispatch: # 允许手动触发
+
+jobs:
+  login:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Login with Cookie
+        run: |
+          echo "开始登录..."
+          
+          # 从 GitHub Secrets 读取 Cookie
+          COOKIE="${{ secrets.LOGIN_COOKIE }}"
+          
+          # 使用 curl 发送带 Cookie 的请求到登录页面
+          response=$(curl -s -w "\n%{http_code}" -L \
+            -H "Cookie: $COOKIE" \
+            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
+            -H "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8" \
+            -H "Accept-Language: zh-CN,zh;q=0.9,en;q=0.8" \
+            "https://optiklink.com/")
+          
+          # 分离响应体和状态码
+          http_code=$(echo "$response" | tail -n1)
+          body=$(echo "$response" | sed '$d')
+          
+          echo "HTTP 状态码: $http_code"
+          
+          # 检查是否登录成功
+          if [ "$http_code" = "200" ]; then
+            echo "✅ 登录成功！"
+            echo "登录时间: $(date '+%Y-%m-%d %H:%M:%S')"
+            
+            # 可选：检查响应内容是否包含登录后的特征
+            if echo "$body" | grep -q "logout\|dashboard\|account"; then
+              echo "✅ 确认已登录状态"
+            else
+              echo "⚠️ 请求成功但可能未登录"
+            fi
+          else
+            echo "❌ 登录失败，HTTP状态码: $http_code"
+            exit 1
+          fi
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## 登录结果 📊" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- 🕐 执行时间: $(date '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
+          echo "- 🌐 目标网站: https://optiklink.com/" >> $GITHUB_STEP_SUMMARY
+          if [ $? -eq 0 ]; then
+            echo "- ✅ 状态: 登录成功" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- ❌ 状态: 登录失败" >> $GITHUB_STEP_SUMMARY
+          fi
