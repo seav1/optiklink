@@ -2,8 +2,8 @@ name: Auto Login with Cookie
 
 on:
   schedule:
-    # 每2天运行一次，北京时间上午9点（UTC 1:00）
-    - cron: '0 1 */2 * *'
+    # 每天运行一次，北京时间上午9点（UTC 1:00）
+    - cron: '0 1 * * *'
   workflow_dispatch: # 允许手动触发
 
 jobs:
