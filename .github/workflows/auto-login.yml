@@ -2,8 +2,8 @@ name: Auto Login with Cookie
 
 on:
   schedule:
-    # 每天运行一次，北京时间上午9点（UTC 1:00）
-    - cron: '0 1 * * *'
+    # 每2天运行一次，北京时间上午9点（UTC 1:00）
+    - cron: '0 1 */2 * *'
   workflow_dispatch: # 允许手动触发
 
 jobs:
@@ -13,13 +13,7 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        
-      - name: Set up WARP
-        uses: fscarmen/warp-on-actions@v1.4
-        with:
-          stack: dual        # Optional. Support [ ipv4, ipv6, dual ]. Default is dual.
-          mode: wireguard    # Optional. Support [ wireguard, client ]. Default is wireguard.
-      
+
       - name: Install PyNaCl
         run: |
           pip install PyNaCl
@@ -32,11 +26,13 @@ jobs:
         run: |
           echo "开始登录..."
           
-          # 创建临时文件存储 Cookie
+          # 创建临时文件存储 Cookie 和响应头
           COOKIE_FILE=$(mktemp)
+          HEADER_FILE=$(mktemp)
           
-          # 使用 curl 发送请求并保存新的 Cookie
+          # 使用 curl 发送请求并保存响应头
           response=$(curl -s -w "\n%{http_code}" -L \
+            -D "$HEADER_FILE" \
             -c "$COOKIE_FILE" \
             -b "$OLD_COOKIE" \
             -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
@@ -61,29 +57,62 @@ jobs:
           echo "✅ 登录成功！"
           echo "登录时间: $(date '+%Y-%m-%d %H:%M:%S')"
           
-          # 从 Cookie 文件中提取新的 Cookie
+          # 从响应头和 Cookie 文件中提取新的 Cookie
           NEW_COOKIE=""
-          if [ -f "$COOKIE_FILE" ]; then
-            echo "提取新的 Cookie..."
-            
-            # 解析 cookie 文件，格式化为浏览器格式
-            while IFS=$'\t' read -r domain flag path secure expiration name value; do
-              # 跳过注释行和空行
-              if [[ "$domain" == \#* ]] || [ -z "$domain" ]; then
+          
+          echo "提取新的 Cookie..."
+          
+          # 方法1: 从响应头的 Set-Cookie 中提取
+          if [ -f "$HEADER_FILE" ]; then
+            while IFS= read -r line; do
+              if [[ "$line" =~ ^[Ss]et-[Cc]ookie:\ (.+)$ ]]; then
+                cookie_value="${BASH_REMATCH[1]}"
+                # 提取 cookie 的 name=value 部分（去掉其他属性）
+                cookie_pair=$(echo "$cookie_value" | cut -d';' -f1 | tr -d '\r')
+                
+                if [ -n "$cookie_pair" ]; then
+                  if [ -n "$NEW_COOKIE" ]; then
+                    NEW_COOKIE="$NEW_COOKIE; $cookie_pair"
+                  else
+                    NEW_COOKIE="$cookie_pair"
+                  fi
+                fi
+              fi
+            done < "$HEADER_FILE"
+          fi
+          
+          # 方法2: 如果从响应头没获取到，尝试从 cookie 文件提取
+          if [ -z "$NEW_COOKIE" ] && [ -f "$COOKIE_FILE" ]; then
+            echo "尝试从 Cookie 文件提取..."
+            while read -r line; do
+              # 跳过注释行
+              if [[ "$line" =~ ^#.* ]] || [ -z "$line" ]; then
                 continue
               fi
               
-              # 构建 cookie 字符串
-              if [ -n "$NEW_COOKIE" ]; then
-                NEW_COOKIE="$NEW_COOKIE; $name=$value"
-              else
-                NEW_COOKIE="$name=$value"
+              # Netscape cookie 格式: domain flag path secure expiration name value
+              name=$(echo "$line" | awk '{print $6}')
+              value=$(echo "$line" | awk '{print $7}')
+              
+              if [ -n "$name" ] && [ -n "$value" ]; then
+                if [ -n "$NEW_COOKIE" ]; then
+                  NEW_COOKIE="$NEW_COOKIE; $name=$value"
+                else
+                  NEW_COOKIE="$name=$value"
+                fi
               fi
             done < "$COOKIE_FILE"
-            
-            echo "新 Cookie 已提取"
-            echo "Cookie 长度: ${#NEW_COOKIE}"
           fi
+          
+          # 方法3: 如果还是没有，使用旧 Cookie
+          if [ -z "$NEW_COOKIE" ]; then
+            echo "未获取到新 Cookie，使用原有 Cookie"
+            NEW_COOKIE="$OLD_COOKIE"
+          fi
+          
+          echo "Cookie 已提取"
+          echo "Cookie 长度: ${#NEW_COOKIE}"
+          echo "Cookie 前50字符: ${NEW_COOKIE:0:50}..."
           
           # 如果获取到新的 Cookie，更新 GitHub Secret
           if [ -n "$NEW_COOKIE" ] && [ ${#NEW_COOKIE} -gt 10 ]; then
@@ -147,7 +176,7 @@ jobs:
           fi
           
           # 清理临时文件
-          rm -f "$COOKIE_FILE"
+          rm -f "$COOKIE_FILE" "$HEADER_FILE"
 
       - name: Summary
         if: always()
