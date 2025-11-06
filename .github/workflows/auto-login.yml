@@ -62,6 +62,14 @@ jobs:
           echo "✅ 登录成功！"
           echo "登录时间: $(date '+%Y-%m-%d %H:%M:%S')"
           
+          # 访问 index 页面并停留5秒
+          echo "访问 /index 页面..."
+          curl -s -b "$COOKIE_FILE" \
+            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
+            "https://optiklink.com/index" > /dev/null
+          echo "在 /index 页面停留5秒..."
+          sleep 5
+          
           # 从响应头和 Cookie 文件中提取新的 Cookie
           NEW_COOKIE=""
           
